@@ -16,7 +16,12 @@
   html,body{height:100%;margin:0}
   body{background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;overflow:hidden}
   #stage{position:relative;width:100%;height:100%;overflow:hidden;background:#000}
-  video,canvas#fx{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+  video,canvas#fx,canvas#frame,canvas#heat{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+  canvas#heat{pointer-events:none}
+  .scanhint{position:absolute;left:12px;right:12px;top:calc(62px + env(safe-area-inset-top,0px));
+    background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 12px;
+    backdrop-filter:blur(10px);font-size:12.5px;line-height:1.4;text-align:center}
+  .scanhint b{font-size:20px;display:block;margin-bottom:3px;font-variant-numeric:tabular-nums}
   canvas#fx{pointer-events:none}
   .hud{position:absolute;left:0;right:0;bottom:0;padding:10px 14px calc(10px + env(safe-area-inset-bottom,0px));
        background:linear-gradient(to top,rgba(0,0,0,.78),rgba(0,0,0,0));display:flex;flex-direction:column;gap:8px}
@@ -38,6 +43,15 @@
   .err{color:#ff8a80;font-size:14px;max-width:32rem;white-space:pre-line}
   .top{position:absolute;top:calc(10px + env(safe-area-inset-top,0px));right:12px;left:12px;
        display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap}
+  .seek{position:absolute;left:12px;right:12px;top:calc(62px + env(safe-area-inset-top,0px));
+        background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:12px 14px;
+        backdrop-filter:blur(10px);display:flex;flex-direction:column;gap:8px;align-items:center}
+  .seekval{font-size:54px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1}
+  .seekbar{position:relative;width:100%;height:16px;border-radius:8px;overflow:hidden;
+           background:rgba(255,255,255,.14)}
+  .seekfill{position:absolute;left:0;top:0;bottom:0;width:0%}
+  .seekmax{position:absolute;top:0;bottom:0;width:3px;background:#fff;left:0;opacity:.9}
+  .seekhint{font-size:12px;opacity:.8;text-align:center;line-height:1.35}
   .warn{position:absolute;top:calc(10px + env(safe-area-inset-top,0px));left:12px;max-width:52%;
         font-size:11px;line-height:1.35;background:var(--panel);border:1px solid var(--line);
         border-radius:9px;padding:7px 9px;backdrop-filter:blur(8px);opacity:.92}
@@ -46,18 +60,32 @@
 <body>
 <div id="stage">
   <video id="cam" playsinline muted autoplay></video>
+  <canvas id="frame" hidden></canvas>
+  <canvas id="heat" hidden></canvas>
   <canvas id="fx"></canvas>
+  <div class="scanhint" hidden id="scanhint"></div>
 
   <div class="warn" hidden id="warn"></div>
 
+  <div class="seek" hidden id="seek">
+    <div class="seekval" id="seekval">0</div>
+    <div class="seekbar"><div class="seekfill" id="seekfill"></div><div class="seekmax" id="seekmax"></div></div>
+    <div class="seekhint" id="seekhint">Handy langsam an der Quelle entlangführen</div>
+  </div>
+
   <div class="top" hidden id="topbar">
-    <button id="hold" aria-pressed="false">Spitzen halten</button>
+    <button id="scan" aria-pressed="false">Scan</button>
+    <button id="undo" hidden>Punkt zurück</button>
+    <button id="clear" hidden>Leeren</button>
+    <button id="mode" aria-pressed="false">Suchmodus</button>
+    <button id="lock" hidden>Frequenz sperren</button>
+    <button id="reset" hidden>Max zurück</button>
     <button id="flip">Kamera</button>
   </div>
 
   <div class="hud" hidden id="hud">
     <div class="row">
-      <div class="db"><span id="dbval">–</span><small>dB (rel.)</small></div>
+      <div class="db"><span id="dbval">–</span><small id="dbunit">von 100</small></div>
       <div style="flex:1">
         <div class="scale"></div>
         <div class="ticks"><span>leise</span><span>mittel</span><span>laut</span></div>
@@ -83,7 +111,11 @@ const V=document.getElementById('cam'), C=document.getElementById('fx'), X=C.get
 const startScreen=document.getElementById('startscreen'), errEl=document.getElementById('err');
 const hud=document.getElementById('hud'), topbar=document.getElementById('topbar'), warnEl=document.getElementById('warn');
 const dbEl=document.getElementById('dbval'), srcEl=document.getElementById('srcinfo');
-let stream=null, ac=null, anaM=null, anaL=null, anaR=null, facing='environment', stereo=false, hold=false;
+let stream=null, ac=null, anaM=null, anaL=null, anaR=null, facing='environment', stereo=false;
+let seekMode=false, lockedBand=null, maxSeen=0, seekSmooth=0;
+const seekEl=document.getElementById('seek'), seekVal=document.getElementById('seekval');
+const seekFill=document.getElementById('seekfill'), seekMax=document.getElementById('seekmax');
+const seekHint=document.getElementById('seekhint'), dbUnit=document.getElementById('dbunit');
 
 const STOPS=[[138,143,152],[47,111,237],[37,179,107],[232,210,26],[240,138,36],[230,57,47]];
 function ramp(t){
@@ -148,6 +180,7 @@ const BANDS=28;
 const edges=[];
 for(let i=0;i<=BANDS;i++) edges.push(Math.floor(Math.pow(i/BANDS,2.0)*(N-2))+1);
 
+let lastBands=[];
 let tracked=[];          // geglättete Quellen
 let peakHold=[];         // gehaltene Spitzen
 let smoothT=0;
@@ -200,18 +233,13 @@ function loop(){
   for(const t of tracked){ if(!next.includes(t)&&(t.age=(t.age||0)+1)<14){ t.lvl*=0.82; next.push(t); } }
   tracked=next;
 
+  lastBands=bands;
+  if(scanMode){ drawHeat(); dbEl.textContent=Math.round(smoothT*100); return; }
+
   const W=C.width,H=C.height;
   X.clearRect(0,0,W,H);
   X.lineCap='round';
   const base=Math.min(W,H);
-
-  if(hold){
-    for(const p of peakHold){
-      const c=ramp(p.lvl);
-      X.strokeStyle=rgba(c,0.25); X.lineWidth=base*0.006;
-      X.beginPath(); X.moveTo(p.x*W,H*0.10); X.lineTo(p.x*W,H*0.80); X.stroke();
-    }
-  }
 
   for(const s of tracked){
     if(s.lvl<0.16) continue;
@@ -237,10 +265,10 @@ function loop(){
 
     // Beschriftung
     const f=s.fc>=1000?(s.fc/1000).toFixed(1)+' kHz':Math.round(s.fc)+' Hz';
-    const dbs=Math.round(-70+s.lvl*65);
+    const dbs=Math.round(s.lvl*100);
     X.font=`${Math.round(base*0.032)}px system-ui,sans-serif`;
     X.textAlign='center'; X.textBaseline='bottom';
-    const txt=`${f} · ${dbs} dB`, tw=X.measureText(txt).width;
+    const txt=`${f} · ${dbs}`, tw=X.measureText(txt).width;
     X.fillStyle='rgba(0,0,0,.55)';
     X.fillRect(cx-tw/2-base*0.012,top-base*0.062,tw+base*0.024,base*0.044);
     X.fillStyle=rgba(c,1); X.fillText(txt,cx,top-base*0.022);
@@ -251,10 +279,6 @@ function loop(){
       X.fillText('Richtung unsicher',cx,bot+base*0.028);
     }
 
-    if(hold&&s.lvl>0.45){
-      peakHold.push({x:s.x,lvl:s.lvl});
-      if(peakHold.length>60) peakHold.shift();
-    }
   }
 
   // Spektrumstreifen
@@ -266,23 +290,158 @@ function loop(){
   }
 
   const col=ramp(smoothT);
-  dbEl.textContent=(isFinite(db)&&db>-99)?Math.round(db):'–';
+  dbEl.textContent=Math.round(smoothT*100);
   dbEl.style.color=`rgb(${col[0]},${col[1]},${col[2]})`;
   const live=tracked.filter(s=>s.lvl>=0.16).length;
   srcEl.textContent = live
     ? `Quellen: ${live}` + (stereo?'':' · Richtung nicht messbar (mono)')
     : 'Quellen: keine über der Schwelle';
+
+  if(seekMode) updateSeek(bands);
 }
 
-document.getElementById('go').addEventListener('click',start);
-document.getElementById('hold').addEventListener('click',e=>{
-  hold=!hold; peakHold=[]; e.currentTarget.setAttribute('aria-pressed',hold?'true':'false');
+function updateSeek(bands){
+  if(!bands.length) return;
+  let lvl, info;
+  if(lockedBand!==null && bands[lockedBand]){
+    lvl=bands[lockedBand].lvl;
+    const fc=bands[lockedBand].fc;
+    info='Gesperrt auf '+(fc>=1000?(fc/1000).toFixed(1)+' kHz':Math.round(fc)+' Hz')+
+         ' — nur dieses Geräusch zählt. Handy langsam entlangführen, höchster Wert = Quelle.';
+  }else{
+    let bi=0; for(let i=1;i<bands.length;i++) if(bands[i].lvl>bands[bi].lvl) bi=i;
+    lvl=bands[bi].lvl;
+    const fc=bands[bi].fc;
+    info='Lauteste Frequenz: '+(fc>=1000?(fc/1000).toFixed(1)+' kHz':Math.round(fc)+' Hz')+
+         ' — Geräusch auslösen, dann „Frequenz sperren".';
+    seekEl.dataset.band=bi;
+  }
+  seekSmooth += (lvl-seekSmooth)*0.35;
+  const v=Math.round(seekSmooth*100);
+  if(seekSmooth>maxSeen) maxSeen=seekSmooth;
+  const c=ramp(seekSmooth);
+  seekVal.textContent=v;
+  seekVal.style.color=`rgb(${c[0]},${c[1]},${c[2]})`;
+  seekFill.style.width=(seekSmooth*100)+'%';
+  seekFill.style.background=`rgb(${c[0]},${c[1]},${c[2]})`;
+  seekMax.style.left=Math.min(99,maxSeen*100)+'%';
+  seekHint.textContent=info+' Max: '+Math.round(maxSeen*100);
+}
+
+/* ---------- Scan-Modus: von Hand abgetastete Wärmekarte ---------- */
+const frameC=document.getElementById('frame'), heatC=document.getElementById('heat');
+const scanHint=document.getElementById('scanhint'), stage=document.getElementById('stage');
+const undoBtn=document.getElementById('undo'), clearBtn=document.getElementById('clear');
+let scanMode=false, points=[];
+
+function currentLevel(){
+  if(lockedBand!==null && lastBands[lockedBand]) return lastBands[lockedBand].lvl;
+  return smoothT;
+}
+
+function enterScan(){
+  const d=Math.min(devicePixelRatio||1,2);
+  frameC.width=Math.round(stage.clientWidth*d); frameC.height=Math.round(stage.clientHeight*d);
+  heatC.width=frameC.width; heatC.height=frameC.height;
+  const g=frameC.getContext('2d');
+  const vw=V.videoWidth, vh=V.videoHeight;
+  if(vw&&vh){
+    const sc=Math.max(frameC.width/vw,frameC.height/vh);
+    const w=vw*sc,h=vh*sc;
+    g.drawImage(V,(frameC.width-w)/2,(frameC.height-h)/2,w,h);
+  }
+  frameC.hidden=false; heatC.hidden=false; scanHint.hidden=false;
+  undoBtn.hidden=false; clearBtn.hidden=false;
+  V.style.visibility='hidden'; X.clearRect(0,0,C.width,C.height);
+  points=[]; drawHeat();
+}
+function exitScan(){
+  frameC.hidden=true; heatC.hidden=true; scanHint.hidden=true;
+  undoBtn.hidden=true; clearBtn.hidden=true;
+  V.style.visibility='';
+}
+
+const GW=72, GH=48;
+function drawHeat(){
+  const g=heatC.getContext('2d');
+  g.clearRect(0,0,heatC.width,heatC.height);
+  const lockTxt = lockedBand!==null && lastBands[lockedBand]
+    ? 'Gesperrt auf '+fmtHz(lastBands[lockedBand].fc)+'. '
+    : 'Tipp: erst im Suchmodus die Frequenz sperren, dann scannen. ';
+  scanHint.innerHTML='<b>'+Math.round(currentLevel()*100)+'</b>'+lockTxt+
+    'Handy an eine Stelle halten und im Bild genau dort antippen. '+points.length+' Punkte gesetzt.';
+  if(!points.length) return;
+
+  const small=document.createElement('canvas'); small.width=GW; small.height=GH;
+  const sg=small.getContext('2d');
+  const img=sg.createImageData(GW,GH);
+  const rad=0.26;                       // Reichweite eines Messpunkts (relativ)
+  for(let y=0;y<GH;y++){
+    for(let x=0;x<GW;x++){
+      const px=(x+0.5)/GW, py=(y+0.5)/GH;
+      let num=0,den=0,cover=0;
+      for(const p of points){
+        const dx=px-p.x, dy=py-p.y;
+        const d2=dx*dx+dy*dy;
+        const w=1/(d2+0.0012);
+        num+=w*p.v; den+=w;
+        cover=Math.max(cover,Math.exp(-d2/(rad*rad)));
+      }
+      const v=den?num/den:0;
+      const c=ramp(v);
+      const i=(y*GW+x)*4;
+      img.data[i]=c[0]; img.data[i+1]=c[1]; img.data[i+2]=c[2];
+      img.data[i+3]=Math.round(255*Math.min(1,cover)*(0.20+v*0.72));
+    }
+  }
+  sg.putImageData(img,0,0);
+  g.imageSmoothingEnabled=true; g.imageSmoothingQuality='high';
+  g.drawImage(small,0,0,heatC.width,heatC.height);
+
+  // Messpunkte markieren
+  g.lineWidth=Math.max(1,heatC.width*0.002);
+  for(const p of points){
+    g.strokeStyle='rgba(255,255,255,.75)';
+    g.beginPath(); g.arc(p.x*heatC.width,p.y*heatC.height,heatC.width*0.008,0,Math.PI*2); g.stroke();
+  }
+}
+function fmtHz(f){ return f>=1000?(f/1000).toFixed(1)+' kHz':Math.round(f)+' Hz'; }
+
+stage.addEventListener('click',e=>{
+  if(!scanMode) return;
+  const r=stage.getBoundingClientRect();
+  points.push({x:(e.clientX-r.left)/r.width, y:(e.clientY-r.top)/r.height, v:currentLevel()});
+  drawHeat();
 });
+document.getElementById('scan').addEventListener('click',e=>{
+  scanMode=!scanMode;
+  e.currentTarget.setAttribute('aria-pressed',scanMode?'true':'false');
+  scanMode?enterScan():exitScan();
+});
+undoBtn.addEventListener('click',()=>{ points.pop(); drawHeat(); });
+clearBtn.addEventListener('click',()=>{ points=[]; drawHeat(); });
+
+document.getElementById('go').addEventListener('click',start);
+const lockBtn=document.getElementById('lock'), resetBtn=document.getElementById('reset');
+document.getElementById('mode').addEventListener('click',e=>{
+  seekMode=!seekMode;
+  e.currentTarget.setAttribute('aria-pressed',seekMode?'true':'false');
+  seekEl.hidden=!seekMode; lockBtn.hidden=!seekMode; resetBtn.hidden=!seekMode;
+  lockedBand=null; maxSeen=0; seekSmooth=0;
+  lockBtn.textContent='Frequenz sperren';
+  dbUnit.textContent='von 100';
+});
+lockBtn.addEventListener('click',()=>{
+  if(lockedBand===null){ lockedBand=parseInt(seekEl.dataset.band||'0',10); lockBtn.textContent='Sperre lösen'; }
+  else { lockedBand=null; lockBtn.textContent='Frequenz sperren'; }
+  maxSeen=0;
+});
+resetBtn.addEventListener('click',()=>{ maxSeen=0; });
 document.getElementById('flip').addEventListener('click',async()=>{
   facing=facing==='environment'?'user':'environment';
   if(stream) stream.getTracks().forEach(t=>t.stop());
   if(ac) await ac.close().catch(()=>{});
-  anaM=anaL=anaR=null; tracked=[]; peakHold=[]; await start();
+  anaM=anaL=anaR=null; tracked=[]; peakHold=[]; maxSeen=0; await start();
 });
 </script>
 </body>
