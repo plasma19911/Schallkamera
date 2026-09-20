@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Schallkamera</title>
+<style>
+  :root{
+    box-sizing:border-box;
+    padding-top:env(safe-area-inset-top,0px);
+    padding-bottom:env(safe-area-inset-bottom,0px);
+    --bg:#0b0d10; --fg:#f2f4f7; --panel:rgba(12,14,18,.72); --line:rgba(255,255,255,.18);
+  }
+  :root:not([data-theme="light"]){}
+  *,*::before,*::after{box-sizing:inherit}
+  html,body{height:100%;margin:0}
+  body{background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;overflow:hidden}
+  #stage{position:relative;width:100%;height:100%;overflow:hidden;background:#000}
+  video,canvas#fx{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+  canvas#fx{pointer-events:none}
+  .hud{position:absolute;left:0;right:0;bottom:0;padding:12px 14px calc(12px + env(safe-area-inset-bottom,0px));
+       background:linear-gradient(to top,rgba(0,0,0,.75),rgba(0,0,0,0));display:flex;flex-direction:column;gap:10px}
+  .row{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  .db{font-variant-numeric:tabular-nums;font-size:30px;font-weight:650;line-height:1}
+  .db small{font-size:13px;font-weight:400;opacity:.75;margin-left:4px}
+  .label{font-size:13px;opacity:.8}
+  .scale{height:12px;border-radius:6px;flex:1;min-width:160px;
+    background:linear-gradient(to right,#8a8f98,#2f6fed,#25b36b,#e8d21a,#f08a24,#e6392f)}
+  .ticks{display:flex;justify-content:space-between;font-size:11px;opacity:.65}
+  button{font:inherit;padding:11px 16px;border-radius:11px;border:1px solid var(--line);
+    background:var(--panel);color:var(--fg);backdrop-filter:blur(8px)}
+  button:active{transform:scale(.98)}
+  .start{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
+    gap:16px;text-align:center;padding:24px;background:var(--bg)}
+  .start p{max-width:32rem;opacity:.8;line-height:1.5;margin:0;font-size:14px}
+  .start button{padding:15px 26px;font-size:17px;font-weight:600}
+  .err{color:#ff8a80;font-size:14px;max-width:32rem}
+  .top{position:absolute;top:calc(10px + env(safe-area-inset-top,0px));right:12px;display:flex;gap:8px}
+  .peak{font-size:12px;opacity:.75}
+</style>
+</head>
+<body>
+<div id="stage">
+  <video id="cam" playsinline muted autoplay></video>
+  <canvas id="fx"></canvas>
+
+  <div class="top" hidden id="topbar">
+    <button id="flip">Kamera wechseln</button>
+  </div>
+
+  <div class="hud" hidden id="hud">
+    <div class="row">
+      <div class="db"><span id="dbval">–</span><small>dB (rel.)</small></div>
+      <div style="flex:1">
+        <div class="scale"></div>
+        <div class="ticks"><span>leise</span><span>mittel</span><span>laut</span></div>
+      </div>
+    </div>
+    <div class="row">
+      <span class="label" id="dir">Richtung: –</span>
+      <span class="peak" id="peak">Spitze: –</span>
+    </div>
+  </div>
+
+  <div class="start" id="startscreen">
+    <h1 style="margin:0;font-size:22px">Schallkamera</h1>
+    <p>Zeigt dir live über dem Kamerabild, wie laut es ist — von grau (leise) über blau, grün, gelb, orange bis rot (laut).
+       Bei Stereo-Mikrofon wandert der Fleck nach links/rechts, hohe Töne nach oben, tiefe nach unten.</p>
+    <button id="go">Kamera &amp; Mikrofon starten</button>
+    <div class="err" id="err"></div>
+  </div>
+</div>
+
+<script>
+const V=document.getElementById('cam'), C=document.getElementById('fx'), X=C.getContext('2d');
+const startScreen=document.getElementById('startscreen'), errEl=document.getElementById('err');
+const hud=document.getElementById('hud'), topbar=document.getElementById('topbar');
+const dbEl=document.getElementById('dbval'), dirEl=document.getElementById('dir'), peakEl=document.getElementById('peak');
+let stream=null, ac=null, anaM=null, anaL=null, anaR=null, facing='environment';
+let peakDb=-99, peakAt=0;
+
+// Farbskala: grau -> blau -> grün -> gelb -> orange -> rot
+const STOPS=[[138,143,152],[47,111,237],[37,179,107],[232,210,26],[240,138,36],[230,57,47]];
+function ramp(t){
+  t=Math.max(0,Math.min(1,t));
+  const s=t*(STOPS.length-1), i=Math.min(STOPS.length-2,Math.floor(s)), f=s-i;
+  const a=STOPS[i], b=STOPS[i+1];
+  return [0,1,2].map(k=>Math.round(a[k]+(b[k]-a[k])*f));
+}
+
+async function start(){
+  errEl.textContent='';
+  try{
+    stream=await navigator.mediaDevices.getUserMedia({
+      video:{facingMode:{ideal:facing}},
+      audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false,channelCount:2}
+    });
+  }catch(e){
+    errEl.textContent='Zugriff nicht möglich: '+e.message+
+      '\nTipp: Die Seite in einem eigenen Browser-Tab öffnen und Kamera + Mikrofon erlauben.';
+    return;
+  }
+  V.srcObject=stream; await V.play().catch(()=>{});
+  startScreen.hidden=true; hud.hidden=false; topbar.hidden=false;
+
+  ac=new (window.AudioContext||window.webkitAudioContext)();
+  await ac.resume().catch(()=>{});
+  const src=ac.createMediaStreamSource(stream);
+  const mk=()=>{const a=ac.createAnalyser();a.fftSize=2048;a.smoothingTimeConstant=.6;return a};
+  anaM=mk(); src.connect(anaM);
+  const ch=src.channelCount||1;
+  if(ch>1){
+    const sp=ac.createChannelSplitter(2);
+    src.connect(sp); anaL=mk(); anaR=mk();
+    sp.connect(anaL,0); sp.connect(anaR,1);
+  }
+  resize(); requestAnimationFrame(loop);
+}
+
+function resize(){
+  const d=Math.min(devicePixelRatio||1,2);
+  C.width=Math.round(C.clientWidth*d); C.height=Math.round(C.clientHeight*d);
+}
+addEventListener('resize',resize);
+
+const buf=new Float32Array(2048), spec=new Uint8Array(1024);
+function rms(a){let s=0;for(let i=0;i<a.length;i++)s+=a[i]*a[i];return Math.sqrt(s/a.length)}
+function level(an){ an.getFloatTimeDomainData(buf); return rms(buf) }
+
+let smoothX=.5, smoothY=.5, smoothT=0;
+function loop(){
+  requestAnimationFrame(loop);
+  if(!anaM) return;
+
+  const r=level(anaM);
+  const db=20*Math.log10(Math.max(r,1e-7));           // ca. -100 (still) bis 0 (Vollaussteuerung)
+  const t=(db+70)/65;                                  // auf 0..1 normiert
+  smoothT+=((Math.max(0,Math.min(1,t)))-smoothT)*0.25;
+
+  // Klangfarbe -> Höhe
+  anaM.getByteFrequencyData(spec);
+  let num=0,den=0;
+  for(let i=1;i<spec.length;i++){ num+=i*spec[i]; den+=spec[i]; }
+  const centroid=den>0?num/den/spec.length:0.25;
+  const ty=1-Math.min(1,Math.pow(centroid*3.2,0.6));
+  smoothY+=(ty-smoothY)*0.15;
+
+  // Stereo -> Richtung
+  let tx=0.5, dirTxt='Richtung: mono (nicht ortbar)';
+  if(anaL&&anaR){
+    const l=level(anaL), rr=level(anaR), sum=l+rr;
+    if(sum>1e-5){
+      const bal=(rr-l)/sum;
+      tx=0.5+bal*0.42;
+      dirTxt='Richtung: '+(bal<-0.12?'links':bal>0.12?'rechts':'mittig');
+    }
+  }
+  smoothX+=(tx-smoothX)*0.15;
+
+  const W=C.width,H=C.height;
+  X.clearRect(0,0,W,H);
+
+  const col=ramp(smoothT);
+  const alpha=0.10+smoothT*0.55;
+
+  // Hotspot
+  const cx=smoothX*W, cy=(0.18+smoothY*0.52)*H;
+  const rad=Math.min(W,H)*(0.16+smoothT*0.40);
+  const g=X.createRadialGradient(cx,cy,rad*0.05,cx,cy,rad);
+  g.addColorStop(0,`rgba(${col[0]},${col[1]},${col[2]},${alpha})`);
+  g.addColorStop(0.55,`rgba(${col[0]},${col[1]},${col[2]},${alpha*0.35})`);
+  g.addColorStop(1,`rgba(${col[0]},${col[1]},${col[2]},0)`);
+  X.fillStyle=g; X.fillRect(0,0,W,H);
+
+  // Randglühen bei hoher Lautstärke
+  if(smoothT>0.62){
+    const e=X.createLinearGradient(0,0,0,H), a=(smoothT-0.62)*0.7;
+    e.addColorStop(0,`rgba(${col[0]},${col[1]},${col[2]},${a})`);
+    e.addColorStop(.35,'rgba(0,0,0,0)'); e.addColorStop(.65,'rgba(0,0,0,0)');
+    e.addColorStop(1,`rgba(${col[0]},${col[1]},${col[2]},${a})`);
+    X.fillStyle=e; X.fillRect(0,0,W,H);
+  }
+
+  // Spektrum-Streifen: x = Frequenz, Farbe = Pegel
+  const bars=64, bw=W/bars, bh=Math.max(6,H*0.02), by=H-bh-2;
+  for(let i=0;i<bars;i++){
+    let s=0,n=0;
+    const a=Math.floor(Math.pow(i/bars,1.8)*spec.length);
+    const b=Math.max(a+1,Math.floor(Math.pow((i+1)/bars,1.8)*spec.length));
+    for(let k=a;k<b&&k<spec.length;k++){s+=spec[k];n++}
+    const v=n?s/n/255:0, c=ramp(v);
+    X.fillStyle=`rgba(${c[0]},${c[1]},${c[2]},${0.25+v*0.7})`;
+    X.fillRect(i*bw,by,bw-1,bh);
+  }
+
+  const shown=Math.round(db);
+  dbEl.textContent=isFinite(shown)&&shown>-99?shown:'–';
+  dbEl.style.color=`rgb(${col[0]},${col[1]},${col[2]})`;
+  dirEl.textContent=dirTxt;
+  const now=performance.now();
+  if(db>peakDb||now-peakAt>4000){ peakDb=db; peakAt=now; }
+  peakEl.textContent='Spitze: '+Math.round(peakDb)+' dB';
+}
+
+document.getElementById('go').addEventListener('click',start);
+document.getElementById('flip').addEventListener('click',async()=>{
+  facing=facing==='environment'?'user':'environment';
+  if(stream) stream.getTracks().forEach(t=>t.stop());
+  if(ac) await ac.close().catch(()=>{});
+  anaM=anaL=anaR=null; await start();
+});
+</script>
+</body>
+</html>
