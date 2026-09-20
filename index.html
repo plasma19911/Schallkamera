@@ -11,7 +11,6 @@
     padding-bottom:env(safe-area-inset-bottom,0px);
     --bg:#0b0d10; --fg:#f2f4f7; --panel:rgba(12,14,18,.72); --line:rgba(255,255,255,.18);
   }
-  :root:not([data-theme="light"]){}
   *,*::before,*::after{box-sizing:inherit}
   [hidden]{display:none !important}
   html,body{height:100%;margin:0}
@@ -19,25 +18,29 @@
   #stage{position:relative;width:100%;height:100%;overflow:hidden;background:#000}
   video,canvas#fx{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
   canvas#fx{pointer-events:none}
-  .hud{position:absolute;left:0;right:0;bottom:0;padding:12px 14px calc(12px + env(safe-area-inset-bottom,0px));
-       background:linear-gradient(to top,rgba(0,0,0,.75),rgba(0,0,0,0));display:flex;flex-direction:column;gap:10px}
+  .hud{position:absolute;left:0;right:0;bottom:0;padding:10px 14px calc(10px + env(safe-area-inset-bottom,0px));
+       background:linear-gradient(to top,rgba(0,0,0,.78),rgba(0,0,0,0));display:flex;flex-direction:column;gap:8px}
   .row{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
-  .db{font-variant-numeric:tabular-nums;font-size:30px;font-weight:650;line-height:1}
+  .db{font-variant-numeric:tabular-nums;font-size:28px;font-weight:650;line-height:1}
   .db small{font-size:13px;font-weight:400;opacity:.75;margin-left:4px}
-  .label{font-size:13px;opacity:.8}
-  .scale{height:12px;border-radius:6px;flex:1;min-width:160px;
+  .label{font-size:12px;opacity:.8}
+  .scale{height:11px;border-radius:6px;flex:1;min-width:150px;
     background:linear-gradient(to right,#8a8f98,#2f6fed,#25b36b,#e8d21a,#f08a24,#e6392f)}
-  .ticks{display:flex;justify-content:space-between;font-size:11px;opacity:.65}
-  button{font:inherit;padding:11px 16px;border-radius:11px;border:1px solid var(--line);
+  .ticks{display:flex;justify-content:space-between;font-size:11px;opacity:.6}
+  button{font:inherit;padding:10px 14px;border-radius:11px;border:1px solid var(--line);
     background:var(--panel);color:var(--fg);backdrop-filter:blur(8px)}
   button:active{transform:scale(.98)}
+  button[aria-pressed="true"]{background:rgba(255,255,255,.22)}
   .start{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
     gap:16px;text-align:center;padding:24px;background:var(--bg)}
   .start p{max-width:32rem;opacity:.8;line-height:1.5;margin:0;font-size:14px}
   .start button{padding:15px 26px;font-size:17px;font-weight:600}
-  .err{color:#ff8a80;font-size:14px;max-width:32rem}
-  .top{position:absolute;top:calc(10px + env(safe-area-inset-top,0px));right:12px;display:flex;gap:8px}
-  .peak{font-size:12px;opacity:.75}
+  .err{color:#ff8a80;font-size:14px;max-width:32rem;white-space:pre-line}
+  .top{position:absolute;top:calc(10px + env(safe-area-inset-top,0px));right:12px;left:12px;
+       display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap}
+  .warn{position:absolute;top:calc(10px + env(safe-area-inset-top,0px));left:12px;max-width:52%;
+        font-size:11px;line-height:1.35;background:var(--panel);border:1px solid var(--line);
+        border-radius:9px;padding:7px 9px;backdrop-filter:blur(8px);opacity:.92}
 </style>
 </head>
 <body>
@@ -45,8 +48,11 @@
   <video id="cam" playsinline muted autoplay></video>
   <canvas id="fx"></canvas>
 
+  <div class="warn" hidden id="warn"></div>
+
   <div class="top" hidden id="topbar">
-    <button id="flip">Kamera wechseln</button>
+    <button id="hold" aria-pressed="false">Spitzen halten</button>
+    <button id="flip">Kamera</button>
   </div>
 
   <div class="hud" hidden id="hud">
@@ -58,15 +64,15 @@
       </div>
     </div>
     <div class="row">
-      <span class="label" id="dir">Richtung: –</span>
-      <span class="peak" id="peak">Spitze: –</span>
+      <span class="label" id="srcinfo">Quellen: –</span>
     </div>
   </div>
 
   <div class="start" id="startscreen">
     <h1 style="margin:0;font-size:22px">Schallkamera</h1>
-    <p>Zeigt dir live über dem Kamerabild, wie laut es ist — von grau (leise) über blau, grün, gelb, orange bis rot (laut).
-       Bei Stereo-Mikrofon wandert der Fleck nach links/rechts, hohe Töne nach oben, tiefe nach unten.</p>
+    <p>Markiert Geräuschquellen im Kamerabild farbig — grau (leise) über blau, grün, gelb, orange bis rot (laut).
+       Die Position links/rechts wird aus dem Stereo-Mikrofon gemessen. Die Höhe im Bild lässt sich mit einem
+       Handy nicht bestimmen, deshalb sind die Markierungen Säulen und keine Punkte.</p>
     <button id="go">Kamera &amp; Mikrofon starten</button>
     <div class="err" id="err"></div>
   </div>
@@ -75,12 +81,10 @@
 <script>
 const V=document.getElementById('cam'), C=document.getElementById('fx'), X=C.getContext('2d');
 const startScreen=document.getElementById('startscreen'), errEl=document.getElementById('err');
-const hud=document.getElementById('hud'), topbar=document.getElementById('topbar');
-const dbEl=document.getElementById('dbval'), dirEl=document.getElementById('dir'), peakEl=document.getElementById('peak');
-let stream=null, ac=null, anaM=null, anaL=null, anaR=null, facing='environment';
-let peakDb=-99, peakAt=0;
+const hud=document.getElementById('hud'), topbar=document.getElementById('topbar'), warnEl=document.getElementById('warn');
+const dbEl=document.getElementById('dbval'), srcEl=document.getElementById('srcinfo');
+let stream=null, ac=null, anaM=null, anaL=null, anaR=null, facing='environment', stereo=false, hold=false;
 
-// Farbskala: grau -> blau -> grün -> gelb -> orange -> rot
 const STOPS=[[138,143,152],[47,111,237],[37,179,107],[232,210,26],[240,138,36],[230,57,47]];
 function ramp(t){
   t=Math.max(0,Math.min(1,t));
@@ -88,17 +92,18 @@ function ramp(t){
   const a=STOPS[i], b=STOPS[i+1];
   return [0,1,2].map(k=>Math.round(a[k]+(b[k]-a[k])*f));
 }
+const rgba=(c,a)=>`rgba(${c[0]},${c[1]},${c[2]},${a})`;
 
 async function start(){
   errEl.textContent='';
   try{
     stream=await navigator.mediaDevices.getUserMedia({
       video:{facingMode:{ideal:facing}},
-      audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false,channelCount:2}
+      audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false,channelCount:{ideal:2}}
     });
   }catch(e){
     errEl.textContent='Zugriff nicht möglich: '+e.message+
-      '\nTipp: Die Seite in einem eigenen Browser-Tab öffnen und Kamera + Mikrofon erlauben.';
+      '\nDie Seite braucht HTTPS und die Freigabe für Kamera und Mikrofon.';
     return;
   }
   V.srcObject=stream; await V.play().catch(()=>{});
@@ -107,14 +112,23 @@ async function start(){
   ac=new (window.AudioContext||window.webkitAudioContext)();
   await ac.resume().catch(()=>{});
   const src=ac.createMediaStreamSource(stream);
-  const mk=()=>{const a=ac.createAnalyser();a.fftSize=2048;a.smoothingTimeConstant=.6;return a};
+  const mk=()=>{const a=ac.createAnalyser();a.fftSize=2048;a.smoothingTimeConstant=.55;return a};
   anaM=mk(); src.connect(anaM);
-  const ch=src.channelCount||1;
-  if(ch>1){
+
+  const track=stream.getAudioTracks()[0];
+  const ch=(track&&track.getSettings&&track.getSettings().channelCount)||src.channelCount||1;
+  stereo = ch>1;
+  if(stereo){
     const sp=ac.createChannelSplitter(2);
     src.connect(sp); anaL=mk(); anaR=mk();
     sp.connect(anaL,0); sp.connect(anaR,1);
   }
+  warnEl.hidden=false;
+  warnEl.textContent = stereo
+    ? 'Stereo erkannt. Position links/rechts wird gemessen, die Höhe nicht — daher Säulen statt Punkte.'
+    : 'Nur ein Mikrofonkanal. Die Richtung lässt sich nicht bestimmen, die Markierung zeigt nur den Pegel.';
+  setTimeout(()=>{warnEl.hidden=true},9000);
+
   resize(); requestAnimationFrame(loop);
 }
 
@@ -124,91 +138,151 @@ function resize(){
 }
 addEventListener('resize',resize);
 
-const buf=new Float32Array(2048), spec=new Uint8Array(1024);
+const N=1024;
+const specM=new Uint8Array(N), specL=new Uint8Array(N), specR=new Uint8Array(N);
+const td=new Float32Array(2048);
 function rms(a){let s=0;for(let i=0;i<a.length;i++)s+=a[i]*a[i];return Math.sqrt(s/a.length)}
-function level(an){ an.getFloatTimeDomainData(buf); return rms(buf) }
 
-let smoothX=.5, smoothY=.5, smoothT=0;
+// Gemittelte Bänder
+const BANDS=28;
+const edges=[];
+for(let i=0;i<=BANDS;i++) edges.push(Math.floor(Math.pow(i/BANDS,2.0)*(N-2))+1);
+
+let tracked=[];          // geglättete Quellen
+let peakHold=[];         // gehaltene Spitzen
+let smoothT=0;
+
 function loop(){
   requestAnimationFrame(loop);
   if(!anaM) return;
 
-  const r=level(anaM);
-  const db=20*Math.log10(Math.max(r,1e-7));           // ca. -100 (still) bis 0 (Vollaussteuerung)
-  const t=(db+70)/65;                                  // auf 0..1 normiert
-  smoothT+=((Math.max(0,Math.min(1,t)))-smoothT)*0.25;
+  anaM.getFloatTimeDomainData(td);
+  const db=20*Math.log10(Math.max(rms(td),1e-7));
+  smoothT+=((Math.max(0,Math.min(1,(db+70)/65)))-smoothT)*0.25;
 
-  // Klangfarbe -> Höhe
-  anaM.getByteFrequencyData(spec);
-  let num=0,den=0;
-  for(let i=1;i<spec.length;i++){ num+=i*spec[i]; den+=spec[i]; }
-  const centroid=den>0?num/den/spec.length:0.25;
-  const ty=1-Math.min(1,Math.pow(centroid*3.2,0.6));
-  smoothY+=(ty-smoothY)*0.15;
+  anaM.getByteFrequencyData(specM);
+  if(stereo){ anaL.getByteFrequencyData(specL); anaR.getByteFrequencyData(specR); }
 
-  // Stereo -> Richtung
-  let tx=0.5, dirTxt='Richtung: mono (nicht ortbar)';
-  if(anaL&&anaR){
-    const l=level(anaL), rr=level(anaR), sum=l+rr;
-    if(sum>1e-5){
-      const bal=(rr-l)/sum;
-      tx=0.5+bal*0.42;
-      dirTxt='Richtung: '+(bal<-0.12?'links':bal>0.12?'rechts':'mittig');
+  // Bänder auswerten
+  const bands=[];
+  const nyq=ac.sampleRate/2;
+  for(let b=0;b<BANDS;b++){
+    let s=0,sl=0,sr=0,n=0;
+    for(let k=edges[b];k<edges[b+1];k++){ s+=specM[k]; if(stereo){sl+=specL[k]; sr+=specR[k];} n++; }
+    if(!n) continue;
+    const lvl=s/n/255;
+    let x=0.5, conf=0;
+    if(stereo){
+      const L=sl/n, R=sr/n, sum=L+R;
+      if(sum>6){ const bal=(R-L)/sum; x=0.5+Math.max(-1,Math.min(1,bal*2.2))*0.44; conf=Math.min(1,Math.abs(bal)*3); }
     }
+    const fc=(edges[b]+edges[b+1])/2/N*nyq;
+    bands.push({lvl,x,conf,fc});
   }
-  smoothX+=(tx-smoothX)*0.15;
+
+  // Lokale Maxima als Quellen
+  const cand=[];
+  for(let i=1;i<bands.length-1;i++){
+    const b=bands[i];
+    if(b.lvl>0.30 && b.lvl>=bands[i-1].lvl && b.lvl>=bands[i+1].lvl) cand.push(b);
+  }
+  cand.sort((a,b)=>b.lvl-a.lvl);
+  const found=cand.slice(0,3);
+
+  // Zeitliche Glättung
+  const next=[];
+  for(const f of found){
+    let m=null,best=1e9;
+    for(const t of tracked){ const d=Math.abs(Math.log2(t.fc/f.fc)); if(d<1.2&&d<best){best=d;m=t} }
+    if(m){ m.lvl+=(f.lvl-m.lvl)*0.3; m.x+=(f.x-m.x)*0.18; m.fc+=(f.fc-m.fc)*0.3; m.conf=f.conf; m.age=0; next.push(m); }
+    else next.push({...f,age:0});
+  }
+  for(const t of tracked){ if(!next.includes(t)&&(t.age=(t.age||0)+1)<14){ t.lvl*=0.82; next.push(t); } }
+  tracked=next;
 
   const W=C.width,H=C.height;
   X.clearRect(0,0,W,H);
+  X.lineCap='round';
+  const base=Math.min(W,H);
 
-  const col=ramp(smoothT);
-  const alpha=0.10+smoothT*0.55;
-
-  // Hotspot
-  const cx=smoothX*W, cy=(0.18+smoothY*0.52)*H;
-  const rad=Math.min(W,H)*(0.16+smoothT*0.40);
-  const g=X.createRadialGradient(cx,cy,rad*0.05,cx,cy,rad);
-  g.addColorStop(0,`rgba(${col[0]},${col[1]},${col[2]},${alpha})`);
-  g.addColorStop(0.55,`rgba(${col[0]},${col[1]},${col[2]},${alpha*0.35})`);
-  g.addColorStop(1,`rgba(${col[0]},${col[1]},${col[2]},0)`);
-  X.fillStyle=g; X.fillRect(0,0,W,H);
-
-  // Randglühen bei hoher Lautstärke
-  if(smoothT>0.62){
-    const e=X.createLinearGradient(0,0,0,H), a=(smoothT-0.62)*0.7;
-    e.addColorStop(0,`rgba(${col[0]},${col[1]},${col[2]},${a})`);
-    e.addColorStop(.35,'rgba(0,0,0,0)'); e.addColorStop(.65,'rgba(0,0,0,0)');
-    e.addColorStop(1,`rgba(${col[0]},${col[1]},${col[2]},${a})`);
-    X.fillStyle=e; X.fillRect(0,0,W,H);
+  if(hold){
+    for(const p of peakHold){
+      const c=ramp(p.lvl);
+      X.strokeStyle=rgba(c,0.25); X.lineWidth=base*0.006;
+      X.beginPath(); X.moveTo(p.x*W,H*0.10); X.lineTo(p.x*W,H*0.80); X.stroke();
+    }
   }
 
-  // Spektrum-Streifen: x = Frequenz, Farbe = Pegel
-  const bars=64, bw=W/bars, bh=Math.max(6,H*0.02), by=H-bh-2;
-  for(let i=0;i<bars;i++){
-    let s=0,n=0;
-    const a=Math.floor(Math.pow(i/bars,1.8)*spec.length);
-    const b=Math.max(a+1,Math.floor(Math.pow((i+1)/bars,1.8)*spec.length));
-    for(let k=a;k<b&&k<spec.length;k++){s+=spec[k];n++}
-    const v=n?s/n/255:0, c=ramp(v);
-    X.fillStyle=`rgba(${c[0]},${c[1]},${c[2]},${0.25+v*0.7})`;
+  for(const s of tracked){
+    if(s.lvl<0.16) continue;
+    const c=ramp(s.lvl);
+    const cx=s.x*W, halfW=base*(0.055+s.lvl*0.075);
+    const top=H*0.12, bot=H*0.78, midY=(top+bot)/2, halfH=(bot-top)/2;
+
+    // Weiche farbige Füllung der Säule
+    const g=X.createLinearGradient(cx-halfW,0,cx+halfW,0);
+    g.addColorStop(0,rgba(c,0)); g.addColorStop(.5,rgba(c,0.13+s.lvl*0.30)); g.addColorStop(1,rgba(c,0));
+    X.fillStyle=g; X.fillRect(cx-halfW,top,halfW*2,bot-top);
+
+    // Umrandung als gestreckte Ellipse
+    X.strokeStyle=rgba(c,0.55+s.lvl*0.4);
+    X.lineWidth=base*(0.004+s.lvl*0.006);
+    X.beginPath(); X.ellipse(cx,midY,halfW,halfH,0,0,Math.PI*2); X.stroke();
+
+    // Markierungsstriche oben und unten
+    X.beginPath();
+    X.moveTo(cx-halfW*0.45,top-base*0.012); X.lineTo(cx+halfW*0.45,top-base*0.012);
+    X.moveTo(cx-halfW*0.45,bot+base*0.012); X.lineTo(cx+halfW*0.45,bot+base*0.012);
+    X.stroke();
+
+    // Beschriftung
+    const f=s.fc>=1000?(s.fc/1000).toFixed(1)+' kHz':Math.round(s.fc)+' Hz';
+    const dbs=Math.round(-70+s.lvl*65);
+    X.font=`${Math.round(base*0.032)}px system-ui,sans-serif`;
+    X.textAlign='center'; X.textBaseline='bottom';
+    const txt=`${f} · ${dbs} dB`, tw=X.measureText(txt).width;
+    X.fillStyle='rgba(0,0,0,.55)';
+    X.fillRect(cx-tw/2-base*0.012,top-base*0.062,tw+base*0.024,base*0.044);
+    X.fillStyle=rgba(c,1); X.fillText(txt,cx,top-base*0.022);
+
+    if(stereo && s.conf<0.12){
+      X.font=`${Math.round(base*0.024)}px system-ui,sans-serif`;
+      X.fillStyle='rgba(255,255,255,.7)'; X.textBaseline='top';
+      X.fillText('Richtung unsicher',cx,bot+base*0.028);
+    }
+
+    if(hold&&s.lvl>0.45){
+      peakHold.push({x:s.x,lvl:s.lvl});
+      if(peakHold.length>60) peakHold.shift();
+    }
+  }
+
+  // Spektrumstreifen
+  const bh=Math.max(5,H*0.016), by=H-bh-2, bw=W/bands.length;
+  for(let i=0;i<bands.length;i++){
+    const c=ramp(bands[i].lvl);
+    X.fillStyle=rgba(c,0.22+bands[i].lvl*0.7);
     X.fillRect(i*bw,by,bw-1,bh);
   }
 
-  const shown=Math.round(db);
-  dbEl.textContent=isFinite(shown)&&shown>-99?shown:'–';
+  const col=ramp(smoothT);
+  dbEl.textContent=(isFinite(db)&&db>-99)?Math.round(db):'–';
   dbEl.style.color=`rgb(${col[0]},${col[1]},${col[2]})`;
-  dirEl.textContent=dirTxt;
-  const now=performance.now();
-  if(db>peakDb||now-peakAt>4000){ peakDb=db; peakAt=now; }
-  peakEl.textContent='Spitze: '+Math.round(peakDb)+' dB';
+  const live=tracked.filter(s=>s.lvl>=0.16).length;
+  srcEl.textContent = live
+    ? `Quellen: ${live}` + (stereo?'':' · Richtung nicht messbar (mono)')
+    : 'Quellen: keine über der Schwelle';
 }
 
 document.getElementById('go').addEventListener('click',start);
+document.getElementById('hold').addEventListener('click',e=>{
+  hold=!hold; peakHold=[]; e.currentTarget.setAttribute('aria-pressed',hold?'true':'false');
+});
 document.getElementById('flip').addEventListener('click',async()=>{
   facing=facing==='environment'?'user':'environment';
   if(stream) stream.getTracks().forEach(t=>t.stop());
   if(ac) await ac.close().catch(()=>{});
-  anaM=anaL=anaR=null; await start();
+  anaM=anaL=anaR=null; tracked=[]; peakHold=[]; await start();
 });
 </script>
 </body>
